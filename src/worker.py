@@ -1,8 +1,24 @@
+"""
+Telegram MCP Server - FastMCP Cloud Edition
+
+Provides Telegram bot functionality through MCP protocol.
+Includes tools for messaging admin and scheduling daily messages.
+"""
+
+import os
 import httpx
-import json
-from workers import DurableObject, WorkerEntrypoint, Response
-from mcp.server.fastmcp import FastMCP
-import asgi
+from fastmcp import FastMCP
+
+# Get configuration from environment variables
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+
+# Create MCP server
+mcp = FastMCP("Telegram MCP Server")
+
+# In-memory storage for scheduled messages (for FastMCP Cloud)
+# Note: This will reset on deployment. For persistence, use FastMCP Cloud's storage features
+scheduled_messages = []
 
 
 async def send_telegram_message(bot_token: str, chat_id: str, text: str) -> dict:
@@ -21,124 +37,108 @@ async def send_telegram_message(bot_token: str, chat_id: str, text: str) -> dict
         return response.json()
 
 
-async def send_message_to_admin(env, text: str) -> dict:
-    """Utility function to send a message to admin"""
-    bot_token = getattr(env, "TELEGRAM_BOT_TOKEN", None)
-    admin_chat_id = getattr(env, "ADMIN_CHAT_ID", None)
+@mcp.tool
+async def message_admin(text: str) -> dict:
+    """
+    Send a message to the admin chat via Telegram.
 
-    if not bot_token:
-        return {"error": "TELEGRAM_BOT_TOKEN not configured"}
+    Args:
+        text: The message text to send
 
-    if not admin_chat_id:
-        return {"error": "ADMIN_CHAT_ID not configured"}
+    Returns:
+        dict with success status or error message
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        return {"error": "TELEGRAM_BOT_TOKEN not configured in environment"}
 
-    return await send_telegram_message(bot_token, admin_chat_id, text)
+    if not ADMIN_CHAT_ID:
+        return {"error": "ADMIN_CHAT_ID not configured in environment"}
 
+    result = await send_telegram_message(TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, text)
 
-class TelegramMCPServer(DurableObject):
-    def __init__(self, ctx, env):
-        self.ctx = ctx
-        self.env = env
-        self.mcp = FastMCP("Telegram MCP Server")
+    if "error" in result:
+        return result
 
-        # Initialize SQLite storage for daily message
-        self.ctx.storage.sql.exec("""
-            CREATE TABLE IF NOT EXISTS daily_message (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        # Commented out: This tool allows sending messages to arbitrary chat_ids.
-        # An LLM with access to this could potentially send unwanted messages to any user/group.
-        # Use message_admin() instead for restricted, admin-only messaging.
-        # @self.mcp.tool()
-        # async def send_message(chat_id: str, text: str) -> dict:
-        #     """Send a message to a Telegram chat"""
-        #     bot_token = getattr(env, "TELEGRAM_BOT_TOKEN", None)
-        #
-        #     if not bot_token:
-        #         return {"error": "TELEGRAM_BOT_TOKEN not configured"}
-        #
-        #     return await send_telegram_message(bot_token, chat_id, text)
-
-        @self.mcp.tool()
-        async def message_admin(text: str) -> dict:
-            """Send a message to the admin chat"""
-            return await send_message_to_admin(env, text)
-
-        @self.mcp.tool()
-        def message_admin_scheduled(message: str) -> dict:
-            """Add a daily message that will be sent to admin"""
-            try:
-                self.ctx.storage.sql.exec(
-                    "INSERT INTO daily_message (message) VALUES (?)",
-                    message
-                )
-                return {"success": True, "message": "Daily message added"}
-            except Exception as e:
-                return {"error": str(e)}
-
-        self.app = self.mcp.sse_app()
-
-    async def fetch(self, request):
-        url = request.url
-
-        # Handle daily message endpoint
-        if "/send-daily-message" in url:
-            return await self.send_daily_messages()
-
-        return await asgi.fetch(self.app, request, self.env, self.ctx)
-
-    async def send_daily_messages(self):
-        """Send all daily messages from storage to admin"""
-        try:
-            # Get all messages from storage with their IDs
-            cursor = self.ctx.storage.sql.exec(
-                "SELECT id, message FROM daily_message"
-            )
-
-            rows = cursor.toArray().to_py()
-            messages = [(row['id'], row['message']) for row in rows]
-
-            if not messages:
-                return Response(
-                    json.dumps({"error": "No daily messages found in storage"}),
-                    status=404,
-                    headers={"Content-Type": "application/json"}
-                )
-
-            # Send all messages to admin
-            sent_count = 0
-
-            for message_id, message_text in messages:
-                result = await send_message_to_admin(self.env, message_text)
-
-                if "error" not in result:
-                    # Delete the message from storage after successful send
-                    self.ctx.storage.sql.exec(
-                        "DELETE FROM daily_message WHERE id = ?",
-                        message_id
-                    )
-                    sent_count += 1
-
-            return Response(
-                json.dumps({"success": True, "message": f"Sent {sent_count} daily messages"}),
-                status=200,
-                headers={"Content-Type": "application/json"}
-            )
-        except Exception as e:
-            return Response(
-                json.dumps({"error": str(e)}),
-                status=500,
-                headers={"Content-Type": "application/json"}
-            )
+    return {"success": True, "message": "Message sent to admin"}
 
 
-class Default(WorkerEntrypoint):
-    async def fetch(self, request):
-        # Create a Durable Object instance and forward all requests to it
-        id = self.env.TELEGRAM_MCP.idFromName("telegram-bot")
-        stub = self.env.TELEGRAM_MCP.get(id)
-        return await stub.fetch(request)
+@mcp.tool
+def message_admin_scheduled(message: str) -> dict:
+    """
+    Add a message to the scheduled messages list (to be sent to admin later).
+
+    Args:
+        message: The message to schedule
+
+    Returns:
+        dict with success status
+    """
+    scheduled_messages.append(message)
+    return {
+        "success": True,
+        "message": f"Message scheduled. Total scheduled: {len(scheduled_messages)}"
+    }
+
+
+@mcp.tool
+def list_scheduled_messages() -> dict:
+    """
+    List all scheduled messages.
+
+    Returns:
+        dict with list of scheduled messages
+    """
+    return {
+        "count": len(scheduled_messages),
+        "messages": scheduled_messages
+    }
+
+
+@mcp.tool
+async def send_all_scheduled_messages() -> dict:
+    """
+    Send all scheduled messages to admin and clear the list.
+
+    Returns:
+        dict with count of messages sent
+    """
+    if not scheduled_messages:
+        return {"success": False, "message": "No messages scheduled"}
+
+    if not TELEGRAM_BOT_TOKEN or not ADMIN_CHAT_ID:
+        return {"error": "Telegram credentials not configured"}
+
+    sent_count = 0
+    errors = []
+
+    for message in scheduled_messages[:]:  # Create a copy to iterate
+        result = await send_telegram_message(TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, message)
+
+        if "error" not in result:
+            scheduled_messages.remove(message)
+            sent_count += 1
+        else:
+            errors.append({"message": message, "error": result.get("error")})
+
+    return {
+        "success": True,
+        "sent_count": sent_count,
+        "remaining": len(scheduled_messages),
+        "errors": errors if errors else None
+    }
+
+
+@mcp.resource("telegram://config")
+def telegram_config() -> str:
+    """Get Telegram configuration status"""
+    return f"""Telegram MCP Server Configuration:
+- Bot Token: {'✓ Configured' if TELEGRAM_BOT_TOKEN else '✗ Not configured'}
+- Admin Chat ID: {'✓ Configured' if ADMIN_CHAT_ID else '✗ Not configured'}
+- Scheduled Messages: {len(scheduled_messages)}
+"""
+
+
+@mcp.prompt("notify_admin")
+def notify_admin_prompt(message: str) -> str:
+    """Create a prompt to notify the admin with a message"""
+    return f"Please send the following message to the admin: {message}"
