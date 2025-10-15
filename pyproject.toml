@@ -1,0 +1,18 @@
+[project]
+name = "telegram-mcp-server"
+version = "0.1.0"
+description = "Telegram MCP server"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "webtypy>=0.1.7",
+    "fastapi",
+    "jinja2",
+    "mcp",
+    "httpx",
+]
+
+[dependency-groups]
+dev = [
+    "workers-py"
+]

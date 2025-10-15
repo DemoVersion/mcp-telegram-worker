@@ -1,0 +1,8 @@
+name = "telegram-mcp-server"
+main = "src/worker.py"
+compatibility_flags = ["python_workers"]
+compatibility_date = "2025-08-14"
+
+[vars]
+# TELEGRAM_BOT_TOKEN = "your-bot-token-here"
+# TELEGRAM_WEBHOOK_SECRET = "your-webhook-secret-here"

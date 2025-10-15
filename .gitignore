@@ -1,0 +1,16 @@
+# Virtual Environments
+.venv/
+.venv-*/
+
+# Cloudflare Workers
+.wrangler/
+node_modules/
+python_modules/
+
+# Configuration files with sensitive data
+wrangler.toml
+*.env
+variables.txt
+
+# IDE
+.DS_Store
